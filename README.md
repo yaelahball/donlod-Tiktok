@@ -16,6 +16,22 @@ python -m tiktok_link "https://vm.tiktok.com/ZMabcXYZ/" --json
 python -m tiktok_link "https://www.tiktok.com/@user/video/1234" --cookie "ms_token=..." --download
 ```
 
+### List & download semua video dari satu username
+
+```bash
+# List semua video dari username
+python -m tiktok_link --user shifaalmiraa
+
+# List + unduh semua video (berurutan)
+python -m tiktok_link --user shifaalmiraa --download-all
+
+# Batasi jumlah video
+python -m tiktok_link --user shifaalmiraa --max 30
+
+# Bila halaman profil/API diblokir dari jaringan kamu, sediakan seed video:
+python -m tiktok_link --user shifaalmiraa --seed "https://www.tiktok.com/@shifaalmiraa/video/1234"
+```
+
 Opsi:
 
 | Flag | Keterangan |
@@ -23,6 +39,10 @@ Opsi:
 | `--json` | Output sebagai JSON (termasuk semua URL kandidat) |
 | `--download [PATH]` | Unduh mp4 terbaik ke file (default: `<username>_<id>.mp4`) |
 | `--quality {h264,best}` | `h264` (default) = terbaik dengan codec H.264; `best` = resolusi tertinggi (bisa HEVC) |
+| `--user <username>` | Mode list semua video dari username |
+| `--seed <url_video>` | Seed video user (untuk resolve secUid bila profil diblokir) |
+| `--max <n>` | Batas jumlah video saat `--user` (default: semua) |
+| `--download-all` | Unduh semua video saat `--user` |
 | `--cookie "ms_token=...; tt_webid=..."` | Cookie login TikTok |
 | `--cookies-file cookies.txt` | Path file cookie (format `name=value; ...`) |
 
@@ -50,6 +70,8 @@ Cara ambil cookie: buka TikTok di browser → DevTools → Network → klik requ
 3. Fallback: parse `<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">` dari halaman video
    (jalur paling andal — biasanya bekerja hanya dengan cookie `ms_token`)
 4. Ranking kandidat: H.264 didahulukan, lalu resolusi (dari `GearName`) & bitrate tertinggi
+5. Mode `--user`: resolve `secUid` (profil HTML → `user/detail` API → seed video), lalu
+   paginate `https://www.tiktok.com/api/creator/item_list/` hingga `hasMorePrevious=false`
 
 > Catatan: endpoint `item/detail` bisa balas kosong dari beberapa jaringan. Jalur HTML
 > (universal data) yang terbukti stabil. Cookie `ms_token` diambil dari browser login kamu.

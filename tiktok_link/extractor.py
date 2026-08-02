@@ -97,6 +97,7 @@ def _build_video_info(item_struct):
         caption=item_struct.get("desc") or "",
         duration=_first_int(video.get("duration"), item_struct.get("createTime")),
         cover_url=(video.get("cover") or {}).get("urlList", [""])[0] if isinstance(video.get("cover"), dict) else str(video.get("cover") or ""),
+        sec_uid=author.get("secUid") or "",
         candidates=candidates,
     )
 
@@ -122,18 +123,53 @@ def extract_from_api(payload):
     return None
 
 
-def extract_status(html):
-    """Return (statusCode, statusMsg) from page HTML, or (None, None)."""
+def _get_universal_data(html):
     match = re.search(
         r'<script[^>]+id=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',
         html,
         re.DOTALL | re.IGNORECASE,
     )
     if not match:
-        return None, None
+        return None
     try:
-        data = json.loads(match.group(1))
+        return json.loads(match.group(1))
     except json.JSONDecodeError:
+        return None
+
+
+def extract_sec_uid_from_html(html):
+    """Extract user secUid from a profile page's universal data script."""
+    data = _get_universal_data(html)
+    if not data:
+        return None
+    user = ((data.get("__DEFAULT_SCOPE__") or {}).get("webapp.user-detail") or {}).get("userInfo", {}).get("user") or {}
+    return user.get("secUid") or None
+
+
+def extract_sec_uid_from_user_detail(payload):
+    """Extract user secUid from the user/detail API payload."""
+    if not isinstance(payload, dict):
+        return None
+    user = (payload.get("userInfo") or {}).get("user") or {}
+    return user.get("secUid") or None
+
+
+def extract_videos_from_list(payload):
+    """Extract VideoInfo for every item in an itemList payload."""
+    if not isinstance(payload, dict):
+        return []
+    results = []
+    for item in payload.get("itemList") or payload.get("item_list") or []:
+        info = _build_video_info(item)
+        if info:
+            results.append(info)
+    return results
+
+
+def extract_status(html):
+    """Return (statusCode, statusMsg) from page HTML, or (None, None)."""
+    data = _get_universal_data(html)
+    if not data:
         return None, None
     detail = (data.get("__DEFAULT_SCOPE__") or {}).get("webapp.video-detail") or {}
     code = detail.get("statusCode")
@@ -142,18 +178,10 @@ def extract_status(html):
 
 def extract_from_html(html):
     """Extract VideoInfo from a TikTok video page's universal data script."""
-    match = re.search(
-        r'<script[^>]+id=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',
-        html,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(1))
-    except json.JSONDecodeError:
+    data = _get_universal_data(html)
+    if not data:
         return None
 
-    scope = (data or {}).get("__DEFAULT_SCOPE__") or {}
+    scope = data.get("__DEFAULT_SCOPE__") or {}
     detail = scope.get("webapp.video-detail") or {}
     return extract_from_api(detail or data)

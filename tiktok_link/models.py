@@ -22,6 +22,7 @@ class VideoInfo:
     caption: str = ""
     duration: int = 0
     cover_url: str = ""
+    sec_uid: str = ""
     candidates: list = field(default_factory=list)
 
 

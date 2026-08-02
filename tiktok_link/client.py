@@ -108,6 +108,104 @@ class TikTokClient:
         response.raise_for_status()
         return response.text
 
+    def fetch_profile_page(self, username):
+        username = username.lstrip("@")
+        response = self.session.get(
+            f"https://www.tiktok.com/@{username}",
+            headers=self._common_headers(f"https://www.tiktok.com/@{username}"),
+            timeout=20,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        return response.text
+
+    def fetch_user_detail(self, unique_id):
+        params = {
+            "uniqueId": unique_id.lstrip("@"),
+            "aid": "1988",
+            "app_language": "en",
+            "app_name": "tiktok_web",
+            "browser_language": "en-US",
+            "browser_name": "Mozilla",
+            "browser_online": "true",
+            "browser_platform": "Win32",
+            "browser_version": "5.0 (Windows)",
+            "channel": "tiktok_web",
+            "cookie_enabled": "true",
+            "device_platform": "web_pc",
+            "focus_state": "true",
+            "history_len": "2",
+            "is_fullscreen": "false",
+            "is_page_visible": "true",
+            "language": "en",
+            "os": "windows",
+            "priority_region": "",
+            "region": "US",
+            "screen_height": "1080",
+            "screen_width": "1920",
+            "tz_name": "UTC",
+            "verifyFp": self.verify_fp,
+            "webcast_language": "en",
+        }
+        response = self.session.get(
+            "https://www.tiktok.com/api/user/detail/",
+            params=params,
+            headers=self._common_headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def fetch_creator_item_list(self, sec_uid, cursor, count=15):
+        params = {
+            "aid": "1988",
+            "app_language": "en",
+            "app_name": "tiktok_web",
+            "browser_language": "en-US",
+            "browser_name": "Mozilla",
+            "browser_online": "true",
+            "browser_platform": "Win32",
+            "browser_version": "5.0 (Windows)",
+            "channel": "tiktok_web",
+            "cookie_enabled": "true",
+            "count": str(count),
+            "cursor": str(cursor),
+            "device_platform": "web_pc",
+            "focus_state": "true",
+            "from_page": "user",
+            "history_len": "2",
+            "is_fullscreen": "false",
+            "is_page_visible": "true",
+            "language": "en",
+            "os": "windows",
+            "priority_region": "",
+            "referer": "",
+            "region": "US",
+            "screen_height": "1080",
+            "screen_width": "1920",
+            "secUid": sec_uid,
+            "type": "1",
+            "tz_name": "UTC",
+            "verifyFp": self.verify_fp,
+            "webcast_language": "en",
+        }
+        response = self.session.get(
+            "https://www.tiktok.com/api/creator/item_list/",
+            params=params,
+            headers=self._common_headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        body = response.json()
+        items = body.get("itemList") or []
+        has_more = bool(body.get("hasMorePrevious"))
+        if items:
+            create_time = items[-1].get("createTime")
+            next_cursor = int(create_time * 1000) if create_time else None
+        else:
+            next_cursor = None
+        return items, has_more, next_cursor
+
     def resolve_short_link(self, url):
         response = self.session.get(url, headers=self._common_headers(), timeout=20, allow_redirects=True)
         return response.url

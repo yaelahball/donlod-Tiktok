@@ -3,10 +3,18 @@
 import argparse
 import json
 import sys
+import time
 
 from tiktok_link.client import TikTokClient, download_media, load_cookie_string
 from tiktok_link.errors import TikTokError
-from tiktok_link.extractor import extract_from_api, extract_from_html, extract_status
+from tiktok_link.extractor import (
+    extract_from_api,
+    extract_from_html,
+    extract_sec_uid_from_html,
+    extract_sec_uid_from_user_detail,
+    extract_status,
+    extract_videos_from_list,
+)
 from tiktok_link.models import rank_best, rank_candidates
 from tiktok_link.resolver import (
     extract_video_id,
@@ -70,6 +78,64 @@ def _pick(info, quality):
     return rank_candidates(info.candidates)
 
 
+def resolve_sec_uid(username, client, seed_url=None):
+    """Resolve a username to its secUid. Falls back profile HTML -> API -> seed video."""
+    username = username.lstrip("@")
+
+    if seed_url:
+        try:
+            html = client.fetch_video_page(seed_url)
+            info = extract_from_html(html)
+            if info and info.sec_uid:
+                return info.sec_uid
+        except Exception:
+            pass
+
+    try:
+        html = client.fetch_profile_page(username)
+        sec_uid = extract_sec_uid_from_html(html)
+        if sec_uid:
+            return sec_uid
+    except Exception:
+        pass
+
+    try:
+        payload = client.fetch_user_detail(username)
+        sec_uid = extract_sec_uid_from_user_detail(payload)
+        if sec_uid:
+            return sec_uid
+    except Exception:
+        pass
+
+    raise TikTokError(
+        "Tidak dapat menemukan secUid untuk @%s. Halaman profil/API diblokir dari jaringan ini. "
+        "Coba sediakan salah satu video user sebagai seed: --seed <url_video>." % username
+    )
+
+
+def list_user_videos(username, client, max_count=None, seed_url=None):
+    """Fetch all (or up to max_count) videos from a user's profile."""
+    sec_uid = resolve_sec_uid(username, client, seed_url=seed_url)
+    videos = []
+    cursor = str(int(time.time() * 1000))
+    seen_cursors = set()
+
+    while True:
+        items, has_more, next_cursor = client.fetch_creator_item_list(sec_uid, cursor)
+        infos = extract_videos_from_list({"itemList": items})
+        videos.extend(infos)
+
+        if max_count and len(videos) >= max_count:
+            videos = videos[:max_count]
+            break
+        if not has_more or not next_cursor or str(next_cursor) in seen_cursors:
+            break
+        seen_cursors.add(str(next_cursor))
+        cursor = str(next_cursor)
+
+    return videos
+
+
 def _format_plain(info, quality="h264"):
     best = _pick(info, quality)
     lines = [
@@ -117,7 +183,12 @@ def main(argv=None):
         pass
 
     parser = argparse.ArgumentParser(prog="tiktok-link", description="Dapatkan link MP4 TikTok via HTTP murni")
-    parser.add_argument("url", help="URL video TikTok (vm.tiktok.com/xxx atau @user/video/id)")
+    parser.add_argument("url", nargs="?", default=None,
+                        help="URL video TikTok (vm.tiktok.com/xxx atau @user/video/id)")
+    parser.add_argument("--user", default=None, help="Username TikTok (mis. shifaalmiraa) untuk list semua video")
+    parser.add_argument("--seed", default=None, help="URL salah satu video user sebagai seed untuk resolve secUid (bila profil diblokir)")
+    parser.add_argument("--max", type=int, default=None, help="Batas maksimal video saat list user (default: semua)")
+    parser.add_argument("--download-all", action="store_true", help="Unduh semua video saat list user")
     parser.add_argument("--json", action="store_true", help="Output sebagai JSON")
     parser.add_argument("--download", nargs="?", const="", default=None,
                         help="Unduh mp4 terbaik. Bisa diikuti path tujuan (default: <username>_<id>.mp4)")
@@ -129,6 +200,12 @@ def main(argv=None):
 
     cookie_string = load_cookie_string(args.cookie, file_path=args.cookies_file)
     client = TikTokClient(cookie_string="; ".join(f"{k}={v}" for k, v in cookie_string.items()))
+
+    if args.user:
+        return run_user_mode(args, client)
+
+    if not args.url:
+        parser.error("butuh argument url ATAU --user")
 
     try:
         info = get_video_info(args.url, client)
@@ -154,6 +231,65 @@ def main(argv=None):
         print(_format_json(info, args.quality))
     else:
         print(_format_plain(info, args.quality))
+    return 0
+
+
+def _format_user_list(videos):
+    lines = [f"Total video: {len(videos)}", ""]
+    for index, video in enumerate(videos, 1):
+        lines.append(
+            f"{index:>3}. {video.video_id}  @{video.creator_username or '-'}  "
+            f"{video.caption[:40] or '-'}  {video.duration}s"
+        )
+    return "\n".join(lines)
+
+
+def _format_user_list_json(videos):
+    return json.dumps(
+        [
+            {
+                "video_id": v.video_id,
+                "creator_username": v.creator_username,
+                "caption": v.caption,
+                "duration": v.duration,
+                "best_url": _pick(v, "h264")[0].url if v.candidates else None,
+            }
+            for v in videos
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def run_user_mode(args, client):
+    try:
+        videos = list_user_videos(args.user, client, max_count=args.max, seed_url=args.seed)
+    except TikTokError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(_format_user_list_json(videos))
+    else:
+        print(_format_user_list(videos))
+
+    if args.download_all:
+        failed = 0
+        for index, video in enumerate(videos, 1):
+            best = _pick(video, args.quality)
+            if not best:
+                print(f"[{index}/{len(videos)}] Lewati {video.video_id} (tidak ada mp4)")
+                failed += 1
+                continue
+            dest = f"{video.creator_username or video.video_id}_{video.video_id}.mp4"
+            try:
+                download_media(client.session, best[0].url, dest)
+                print(f"[{index}/{len(videos)}] Tersimpan: {dest}")
+            except Exception as error:
+                print(f"[{index}/{len(videos)}] Gagal {video.video_id}: {error}", file=sys.stderr)
+                failed += 1
+        if failed:
+            return 1
     return 0
 
 
