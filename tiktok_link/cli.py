@@ -203,6 +203,7 @@ def main(argv=None):
     parser.add_argument("--collect", action="store_true", help="Fase 1: kumpulkan daftar video + caption lalu simpan ke state file")
     parser.add_argument("--concurrency", type=int, default=3, help="Jumlah download paralel (default: 3)")
     parser.add_argument("--state", default=None, help="Path state file (default: <username>_downloads.json)")
+    parser.add_argument("--output-dir", default="downloads", help="Folder dasar hasil download (default: downloads, jadi downloads/<username>/...)")
     parser.add_argument("--json", action="store_true", help="Output sebagai JSON")
     parser.add_argument("--download", nargs="?", const="", default=None,
                         help="Unduh mp4 terbaik. Bisa diikuti path tujuan (default: <username>_<id>.mp4)")
@@ -232,7 +233,15 @@ def main(argv=None):
         if not best:
             print("Error: tidak ada kandidat mp4 untuk diunduh.", file=sys.stderr)
             return 1
-        dest = args.download or f"{info.creator_username or info.video_id}_{info.video_id}.mp4"
+        user = info.creator_username or "unknown"
+        if args.download:
+            dest = args.download
+        else:
+            folder = os.path.join(args.output_dir, user)
+            dest = os.path.join(folder, f"{user}_{info.video_id}.mp4")
+        directory = os.path.dirname(dest)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         try:
             download_media(client.session, best[0].url, dest)
             print(f"Tersimpan: {dest}")
@@ -292,13 +301,16 @@ def run_user_mode(args, client):
     return 0
 
 
-def build_entries(username, videos):
+def build_entries(username, videos, output_dir="downloads"):
     """Convert VideoInfo list into DownloadEntry list (all status=pending)."""
     username = username.lstrip("@")
     entries = []
     for index, video in enumerate(videos, 1):
         best = _pick(video, "h264")
-        page_url = "https://www.tiktok.com/@%s/video/%s" % (video.creator_username or username, video.video_id)
+        user = video.creator_username or username
+        page_url = "https://www.tiktok.com/@%s/video/%s" % (user, video.video_id)
+        folder = os.path.join(output_dir, user)
+        filename = os.path.join(folder, "%d_%s_%s.mp4" % (index, video.video_id, user)).replace("\\", "/")
         entries.append(
             DownloadEntry(
                 index=index,
@@ -307,7 +319,7 @@ def build_entries(username, videos):
                 page_url=page_url,
                 mp4_url=best[0].url if best else "",
                 captured_at=int(time.time()),
-                filename="%d_%s_%s.mp4" % (index, video.video_id, video.creator_username or username),
+                filename=filename,
                 status="pending",
             )
         )
@@ -410,6 +422,9 @@ def process_download_batch(entries, client, concurrency, quality, reporter, stat
 
             entry.status = "downloading"
             expected = {"size": 0}
+            directory = os.path.dirname(filename)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
 
             def on_progress(received, total_bytes, speed):
                 if total_bytes:
@@ -477,7 +492,7 @@ def run_collect(args, client):
     if not videos:
         print(f"Tidak ada video ditemukan untuk @{username}.")
         return 1
-    entries = build_entries(username, videos)
+    entries = build_entries(username, videos, output_dir=args.output_dir)
     state_path = args.state or default_state_path(username)
     save_state(state_path, username, entries, args.concurrency)
     print(f"Tersimpan {len(entries)} video ke {state_path}")

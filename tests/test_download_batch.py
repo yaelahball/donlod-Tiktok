@@ -54,17 +54,24 @@ def _video(video_id):
 
 
 class TestBuildEntries(unittest.TestCase):
-    def test_builds_pending_entries(self):
+    def test_builds_pending_entries_with_username_folder(self):
         from tiktok_link.extractor import extract_videos_from_list
 
         videos = extract_videos_from_list({"itemList": [_video("1"), _video("2")]})
         entries = build_entries("dave.xp", videos)
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0].status, "pending")
-        self.assertEqual(entries[0].filename, "1_1_dave.xp.mp4")
-        self.assertEqual(entries[1].filename, "2_2_dave.xp.mp4")
+        self.assertEqual(entries[0].filename, "downloads/dave.xp/1_1_dave.xp.mp4")
+        self.assertEqual(entries[1].filename, "downloads/dave.xp/2_2_dave.xp.mp4")
         self.assertEqual(entries[0].caption, "caption 1")
         self.assertTrue(entries[0].mp4_url.startswith("https://"))
+
+    def test_builds_entries_with_custom_output_dir(self):
+        from tiktok_link.extractor import extract_videos_from_list
+
+        videos = extract_videos_from_list({"itemList": [_video("1")]})
+        entries = build_entries("dave.xp", videos, output_dir="data/videos")
+        self.assertEqual(entries[0].filename, "data/videos/dave.xp/1_1_dave.xp.mp4")
 
 
 class TestPrepareDownloadBatch(unittest.TestCase):
@@ -151,6 +158,28 @@ class TestProcessDownloadBatch(unittest.TestCase):
                 self.assertTrue(os.path.exists("dave.xp_1.mp4"))
                 state = load_state(state_path)
                 self.assertEqual(state["videos"][0]["status"], "success")
+            finally:
+                os.chdir(old)
+
+    def test_creates_output_folder_before_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                entries = [
+                    DownloadEntry(
+                        index=1, video_id="1",
+                        filename="downloads/dave.xp/1_1_dave.xp.mp4",
+                        page_url="https://www.tiktok.com/@dave.xp/video/7234567890123456789",
+                        status="pending",
+                    )
+                ]
+                reporter = BatchReporter(stream=io.StringIO(), use_color=False)
+                process_download_batch(entries, FakeBatchClient(), concurrency=1,
+                                       quality="h264", reporter=reporter,
+                                       state_path="state.json", username="dave.xp")
+                self.assertTrue(os.path.isfile("downloads/dave.xp/1_1_dave.xp.mp4"))
+                self.assertEqual(entries[0].status, "success")
             finally:
                 os.chdir(old)
 

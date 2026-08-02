@@ -60,6 +60,21 @@ di-resolve ulang segar sebelum tiap unduh (karena URL expire ±2 jam). File yang
 terunduh lengkap di-skip; file hilang/partial diunduh ulang. Deteksi cookie mati: setelah
 3 resolve gagal beruntun, sisa video ditandai `failed (cookie_expired)` dan batch berhenti.
 
+### Struktur folder hasil download
+
+Hasil download disimpan rapi per username di `downloads/<username>/`:
+
+```
+tiktok-link/
+└── downloads/
+    └── shifaalmiraa/
+        ├── 1_7668326382128352533_shifaalmiraa.mp4
+        └── 2_7664517417640627477_shifaalmiraa.mp4
+```
+
+Folder dasar bisa diganti: `--output-dir /path/lain`. File state & hasil download
+tidak ikut ke git (`.gitignore`).
+
 Opsi:
 
 | Flag | Keterangan |
@@ -74,6 +89,7 @@ Opsi:
 | `--download-all` | Fase 2: download semua video dari state file (otomatis resume) |
 | `--concurrency <n>` | Jumlah download paralel (default: 3) |
 | `--state <path>` | Path state file (default: `<username>_downloads.json`) |
+| `--output-dir <path>` | Folder dasar hasil download (default: `downloads`, jadi `downloads/<username>/...`) |
 | `--cookie "ms_token=...; tt_webid=..."` | Cookie login TikTok |
 | `--cookies-file cookies.txt` | Path file cookie (format `name=value; ...`) |
 
