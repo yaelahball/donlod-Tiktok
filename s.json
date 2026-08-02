@@ -1,0 +1,46 @@
+{
+  "username": "dave.xp",
+  "created_at": 1785649229,
+  "concurrency": 1,
+  "videos": [
+    {
+      "index": 1,
+      "video_id": "1",
+      "caption": "",
+      "page_url": "https://www.tiktok.com/@dave.xp/video/123",
+      "mp4_url": "",
+      "captured_at": 0,
+      "filename": "v1.mp4",
+      "status": "failed",
+      "error": "Video dibatasi region (person_geo_fencing, statusCode 10204).",
+      "size": null,
+      "expected_size": null
+    },
+    {
+      "index": 2,
+      "video_id": "2",
+      "caption": "",
+      "page_url": "https://www.tiktok.com/@dave.xp/video/123",
+      "mp4_url": "",
+      "captured_at": 0,
+      "filename": "v2.mp4",
+      "status": "failed",
+      "error": "Video dibatasi region (person_geo_fencing, statusCode 10204).",
+      "size": null,
+      "expected_size": null
+    },
+    {
+      "index": 3,
+      "video_id": "3",
+      "caption": "",
+      "page_url": "https://www.tiktok.com/@dave.xp/video/123",
+      "mp4_url": "",
+      "captured_at": 0,
+      "filename": "v3.mp4",
+      "status": "failed",
+      "error": "Video dibatasi region (person_geo_fencing, statusCode 10204).",
+      "size": null,
+      "expected_size": null
+    }
+  ]
+}
