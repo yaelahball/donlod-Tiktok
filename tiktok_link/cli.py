@@ -52,33 +52,35 @@ def get_video_info(url, client):
     info = extract_from_api(payload) if payload else None
 
     if not info:
-        html = client.fetch_video_page(url)
+        html = fetch_page_with_retry(client, url, retries=3, delay=1.0)
         info = extract_from_html(html)
         if not info:
             status_code, status_msg = extract_status(html)
             if status_code in (10216, 10222):
-                raise TikTokError("Video private atau butuh login (statusCode %d)." % status_code)
+                raise _tagged_error("Video private atau butuh login (statusCode %d)." % status_code, "soft")
             if status_code == 10204:
                 if status_msg == "status_self_see":
-                    raise TikTokError(
-                        "Video private (hanya bisa dilihat pembuatnya, statusCode 10204)."
+                    raise _tagged_error(
+                        "Video private (hanya bisa dilihat pembuatnya, statusCode 10204).", "soft"
                     )
                 if status_msg == "person_geo_fencing":
-                    raise TikTokError(
-                        "IP/region kamu diblokir oleh TikTok untuk video ini "
-                        "(statusCode 10204). Coba pakai cookie login atau proxy."
+                    raise _tagged_error(
+                        "Video dibatasi region (person_geo_fencing, statusCode 10204).", "soft"
                     )
-                raise TikTokError(
-                    "TikTok menolak akses video ini (statusCode 10204, %s)."
-                    % (status_msg or "unknown")
+                raise _tagged_error(
+                    "TikTok menolak akses video ini (statusCode 10204, %s)." % (status_msg or "unknown"),
+                    "hard",
                 )
             if status_code and status_code != 0:
-                raise TikTokError("TikTok menolak akses video ini (statusCode %d)." % status_code)
+                raise _tagged_error(
+                    "TikTok menolak akses video ini (statusCode %d)." % status_code, "hard"
+                )
 
     if not info:
-        raise TikTokError(
+        raise _tagged_error(
             "Tidak dapat menemukan link MP4. Video mungkin private, butuh login, "
-            "atau IP/cookie kamu diblokir."
+            "atau IP/cookie kamu diblokir.",
+            "hard",
         )
     return info
 
@@ -95,7 +97,7 @@ def resolve_sec_uid(username, client, seed_url=None):
 
     if seed_url:
         try:
-            html = client.fetch_video_page(seed_url)
+            html = fetch_page_with_retry(client, seed_url, retries=3, delay=1.0)
             info = extract_from_html(html)
             if info and info.sec_uid:
                 return info.sec_uid
@@ -204,6 +206,7 @@ def main(argv=None):
     parser.add_argument("--concurrency", type=int, default=3, help="Jumlah download paralel (default: 3)")
     parser.add_argument("--state", default=None, help="Path state file (default: <username>_downloads.json)")
     parser.add_argument("--output-dir", default="downloads", help="Folder dasar hasil download (default: downloads, jadi downloads/<username>/...)")
+    parser.add_argument("--rate-delay", type=float, default=0.4, help="Jeda detik antar-resolve video untuk hindari rate-limit (default: 0.4)")
     parser.add_argument("--json", action="store_true", help="Output sebagai JSON")
     parser.add_argument("--download", nargs="?", const="", default=None,
                         help="Unduh mp4 terbaik. Bisa diikuti path tujuan (default: <username>_<id>.mp4)")
@@ -371,33 +374,98 @@ def prepare_download_batch(entries):
     return to_process, skipped
 
 
-COOKIE_DEATH_THRESHOLD = 3
+def _tagged_error(message, kind):
+    error = TikTokError(message)
+    error.kind = kind
+    return error
 
 
-def is_cookie_error(error):
+HARD_FAILURE_THRESHOLD = 5
+
+
+def fetch_page_with_retry(client, url, retries=3, delay=1.0):
+    """Fetch a video page, retrying until universal data appears (WAF-flaky resilient)."""
+    html = ""
+    for attempt in range(max(1, retries)):
+        try:
+            html = client.fetch_video_page(url)
+        except Exception:
+            html = ""
+        if "__UNIVERSAL_DATA_FOR_REHYDRATION__" in html:
+            return html
+        if attempt < retries - 1:
+            time.sleep(delay)
+    return html
+
+
+def classify_resolve_error(error):
+    """Return ("soft"|"hard", reason).
+
+    soft = per-video permanent failure (geo/private/no-candidates) - never aborts batch.
+    hard = IP/cookie/rate-limit level (shell/no-data, 403/429, etc.) - may abort after threshold.
+    """
     message = str(error).lower()
-    return any(
-        keyword in message
-        for keyword in ("cookie", "diblokir", "blocked", "expired", "10204", "ip/region")
+    kind = getattr(error, "kind", None)
+    if kind in ("soft", "hard"):
+        return kind, str(error)[:120]
+    if "tidak dapat menemukan link mp4" in message:
+        return "hard", str(error)[:120]
+    soft_keywords = (
+        "status_self_see", "private", "kandidat", "candidate",
+        "butuh login", "person_geo_fencing", "geo_fencing",
     )
+    if any(keyword in message for keyword in soft_keywords):
+        return "soft", str(error)[:120]
+    return "hard", str(error)[:120]
 
 
-def process_download_batch(entries, client, concurrency, quality, reporter, state_path, username):
+def probe_is_healthy(client, entries, retries=3, delay=1.0):
+    """Canary probe: if ANY video page still returns data, the session is alive."""
+    probes = [e for e in entries if e.page_url]
+    if not probes:
+        return False
+    for entry in probes[:3]:
+        html = fetch_page_with_retry(client, entry.page_url, retries=retries, delay=delay)
+        if "__UNIVERSAL_DATA_FOR_REHYDRATION__" in html:
+            return True
+    return False
+
+
+def process_download_batch(entries, client, concurrency, quality, reporter, state_path, username,
+                           rate_delay=0.4):
     """Download pending/failed entries with a thread pool. Returns stats dict."""
     to_process, skipped = prepare_download_batch(entries)
     total = len(entries)
     success = failed = total_size = 0
     done = skipped
-    consecutive_failures = 0
+    consecutive_hard = 0
     stop = threading.Event()
+    canary_in_progress = threading.Lock()
+    canary_checked = False
     lock = threading.Lock()
     failures = []
     active = [0]
 
     save_state(state_path, username, entries, concurrency)
 
+    def maybe_abort(entry, filename, reason):
+        """Abort the batch only if a canary probe confirms cookie/IP death."""
+        nonlocal consecutive_hard, canary_checked
+        with canary_in_progress:
+            if stop.is_set() or canary_checked:
+                return
+            canary_checked = True
+        healthy = probe_is_healthy(client, entries, retries=3, delay=1.0)
+        if healthy:
+            with lock:
+                consecutive_hard = 0
+            reporter.fail(index=entry.index, total=total, filename=filename,
+                          reason="%s (sementara)" % reason)
+            return
+        stop.set()
+
     def work(entry):
-        nonlocal success, failed, total_size, done, consecutive_failures
+        nonlocal success, failed, total_size, done, consecutive_hard
         index, filename = entry.index, entry.filename
         try:
             if stop.is_set():
@@ -412,13 +480,16 @@ def process_download_batch(entries, client, concurrency, quality, reporter, stat
                 reporter.fail(index, total, filename, reason)
                 return
 
+            if rate_delay > 0:
+                time.sleep(rate_delay)
+
             reporter.begin_video(index, total, filename)
             info = get_video_info(entry.page_url, client)
             best = _pick(info, quality)
             if not best:
-                raise TikTokError("tidak ada kandidat mp4")
+                raise _tagged_error("tidak ada kandidat mp4", "soft")
             with lock:
-                consecutive_failures = 0
+                consecutive_hard = 0
 
             entry.status = "downloading"
             expected = {"size": 0}
@@ -443,18 +514,22 @@ def process_download_batch(entries, client, concurrency, quality, reporter, stat
                 save_state(state_path, username, entries, concurrency)
             reporter.success(index, total, filename, entry.size)
         except Exception as error:
-            reason = "cookie_expired" if is_cookie_error(error) else str(error)[:120]
+            kind, reason = classify_resolve_error(error)
             entry.status = "failed"
             entry.error = reason
             with lock:
-                consecutive_failures += 1
+                if kind == "hard":
+                    consecutive_hard += 1
+                else:
+                    consecutive_hard = 0
                 failed += 1
                 done += 1
                 failures.append((filename, reason))
                 save_state(state_path, username, entries, concurrency)
-                if consecutive_failures >= COOKIE_DEATH_THRESHOLD:
-                    stop.set()
+                hit_threshold = consecutive_hard >= HARD_FAILURE_THRESHOLD
             reporter.fail(index, total, filename, reason)
+            if hit_threshold:
+                maybe_abort(entry, filename, reason)
         finally:
             with lock:
                 reporter.overall(done, total, max(0, active[0] - 1))
@@ -523,7 +598,8 @@ def run_download_all(args, client):
     reporter.start(username, len(entries), concurrency, state_path)
     start_time = time.time()
     result = process_download_batch(
-        entries, client, concurrency, args.quality, reporter, state_path, username
+        entries, client, concurrency, args.quality, reporter, state_path, username,
+        rate_delay=args.rate_delay,
     )
     elapsed = time.time() - start_time
     reporter.finish(

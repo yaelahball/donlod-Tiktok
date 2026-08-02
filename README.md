@@ -57,8 +57,24 @@ python -m tiktok_link --user shifaalmiraa --download-all [--concurrency 3] [--qu
 State file `shifaalmiraa_downloads.json` menyimpan per video: `video_id`, `caption`,
 `page_url`, `mp4_url`, `status (pending/success/failed)`, `error`, `size`. URL mp4
 di-resolve ulang segar sebelum tiap unduh (karena URL expire ±2 jam). File yang sudah
-terunduh lengkap di-skip; file hilang/partial diunduh ulang. Deteksi cookie mati: setelah
-3 resolve gagal beruntun, sisa video ditandai `failed (cookie_expired)` dan batch berhenti.
+terunduh lengkap di-skip; file hilang/partial diunduh ulang.
+
+### Ketahanan batch besar (rate-limit & cookie)
+
+Untuk batch ratusan video, tool dibekali:
+
+- **Retry resolve per video** — fetch halaman diulang sampai 3x bila WAF mengirim
+  shell kosong (perilaku tidak menentu dari IP tertentu).
+- **Klasifikasi kegagalan** — error per-video (private, region `person_geo_fencing`,
+  tanpa mp4) dicatat sebagai `failed` dengan alasan aslinya dan **tidak** menghentikan batch.
+- **Canary probe** — batch hanya dihentikan (sisa ditandai `failed (cookie_expired)`)
+  setelah ≥5 kegagalan "keras" beruntun DAN probe video lain juga gagal. Jadi batch
+  tidak akan berhenti sia-sia saat cookie sebenarnya masih sehat.
+- **Pacing** — jeda antar-resolve (`--rate-delay`, default 0.4 detik) untuk menghindari
+  rate-limit TikTok pada download massal.
+
+Cara lanjut setelah dihentikan: perbarui `cookies.txt` (jika memang cookie mati) lalu
+jalankan ulang perintah yang sama — tool hanya memproses yang `pending`/`failed`.
 
 ### Struktur folder hasil download
 
@@ -90,6 +106,7 @@ Opsi:
 | `--concurrency <n>` | Jumlah download paralel (default: 3) |
 | `--state <path>` | Path state file (default: `<username>_downloads.json`) |
 | `--output-dir <path>` | Folder dasar hasil download (default: `downloads`, jadi `downloads/<username>/...`) |
+| `--rate-delay <detik>` | Jeda antar-resolve untuk hindari rate-limit (default: 0.4) |
 | `--cookie "ms_token=...; tt_webid=..."` | Cookie login TikTok |
 | `--cookies-file cookies.txt` | Path file cookie (format `name=value; ...`) |
 
