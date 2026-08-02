@@ -2,6 +2,14 @@
 
 CLI pure-HTTP untuk mendapatkan link MP4 langsung dari video TikTok (tanpa browser/extension).
 
+Fitur:
+- Ambil link MP4 langsung dari URL video / short link
+- Download sistematis semua video satu username dengan **state file resume-able**
+  (status per video: pending/success/failed, lanjut setelah cookie mati)
+- Output CLI kaya: **progress bar per file + ringkasan agregat + report berwarna** (ANSI)
+- Pilih kualitas H.264 (kompatibel) atau resolusi tertinggi (HEVC)
+- Cookie login dari `cookies.txt`, flag, atau env var
+
 ## Instalasi
 
 ```bash
@@ -32,6 +40,26 @@ python -m tiktok_link --user shifaalmiraa --max 30
 python -m tiktok_link --user shifaalmiraa --seed "https://www.tiktok.com/@shifaalmiraa/video/1234"
 ```
 
+### Download sistematis per username (resume-able)
+
+Sistem 2 fase: **collect** (simpan daftar video + caption ke state file) lalu **download**
+(diproses dari list dengan flag status per video). Jika cookie mati/crash di tengah,
+cukup jalankan ulang — tool lanjut dari video yang belum sukses.
+
+```bash
+# FASE 1 (wajib dulu): kumpulkan daftar video + caption, simpan ke <username>_downloads.json
+python -m tiktok_link --user shifaalmiraa --collect [--seed <url>] [--max N]
+
+# FASE 2: download semua dari list (otomatis resume)
+python -m tiktok_link --user shifaalmiraa --download-all [--concurrency 3] [--quality best]
+```
+
+State file `shifaalmiraa_downloads.json` menyimpan per video: `video_id`, `caption`,
+`page_url`, `mp4_url`, `status (pending/success/failed)`, `error`, `size`. URL mp4
+di-resolve ulang segar sebelum tiap unduh (karena URL expire ±2 jam). File yang sudah
+terunduh lengkap di-skip; file hilang/partial diunduh ulang. Deteksi cookie mati: setelah
+3 resolve gagal beruntun, sisa video ditandai `failed (cookie_expired)` dan batch berhenti.
+
 Opsi:
 
 | Flag | Keterangan |
@@ -41,8 +69,11 @@ Opsi:
 | `--quality {h264,best}` | `h264` (default) = terbaik dengan codec H.264; `best` = resolusi tertinggi (bisa HEVC) |
 | `--user <username>` | Mode list semua video dari username |
 | `--seed <url_video>` | Seed video user (untuk resolve secUid bila profil diblokir) |
-| `--max <n>` | Batas jumlah video saat `--user` (default: semua) |
-| `--download-all` | Unduh semua video saat `--user` |
+| `--max <n>` | Batas jumlah video saat list user (default: semua) |
+| `--collect` | Fase 1: kumpulkan daftar video + caption → simpan state file |
+| `--download-all` | Fase 2: download semua video dari state file (otomatis resume) |
+| `--concurrency <n>` | Jumlah download paralel (default: 3) |
+| `--state <path>` | Path state file (default: `<username>_downloads.json`) |
 | `--cookie "ms_token=...; tt_webid=..."` | Cookie login TikTok |
 | `--cookies-file cookies.txt` | Path file cookie (format `name=value; ...`) |
 

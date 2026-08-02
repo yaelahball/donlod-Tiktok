@@ -2,8 +2,11 @@
 
 import argparse
 import json
+import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from tiktok_link.client import TikTokClient, download_media, load_cookie_string
 from tiktok_link.errors import TikTokError
@@ -15,12 +18,20 @@ from tiktok_link.extractor import (
     extract_status,
     extract_videos_from_list,
 )
-from tiktok_link.models import rank_best, rank_candidates
+from tiktok_link.models import (
+    DownloadEntry,
+    default_state_path,
+    load_state,
+    rank_best,
+    rank_candidates,
+    save_state,
+)
 from tiktok_link.resolver import (
     extract_video_id,
     is_short_link,
     normalize_url,
 )
+from tiktok_link.ui import BatchReporter
 
 
 def get_video_info(url, client):
@@ -188,7 +199,10 @@ def main(argv=None):
     parser.add_argument("--user", default=None, help="Username TikTok (mis. shifaalmiraa) untuk list semua video")
     parser.add_argument("--seed", default=None, help="URL salah satu video user sebagai seed untuk resolve secUid (bila profil diblokir)")
     parser.add_argument("--max", type=int, default=None, help="Batas maksimal video saat list user (default: semua)")
-    parser.add_argument("--download-all", action="store_true", help="Unduh semua video saat list user")
+    parser.add_argument("--download-all", action="store_true", help="Unduh semua video dari state file (otomatis resume)")
+    parser.add_argument("--collect", action="store_true", help="Fase 1: kumpulkan daftar video + caption lalu simpan ke state file")
+    parser.add_argument("--concurrency", type=int, default=3, help="Jumlah download paralel (default: 3)")
+    parser.add_argument("--state", default=None, help="Path state file (default: <username>_downloads.json)")
     parser.add_argument("--json", action="store_true", help="Output sebagai JSON")
     parser.add_argument("--download", nargs="?", const="", default=None,
                         help="Unduh mp4 terbaik. Bisa diikuti path tujuan (default: <username>_<id>.mp4)")
@@ -262,35 +276,252 @@ def _format_user_list_json(videos):
 
 
 def run_user_mode(args, client):
+    if args.collect:
+        return run_collect(args, client)
+    if args.download_all:
+        return run_download_all(args, client)
     try:
         videos = list_user_videos(args.user, client, max_count=args.max, seed_url=args.seed)
     except TikTokError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
-
     if args.json:
         print(_format_user_list_json(videos))
     else:
         print(_format_user_list(videos))
-
-    if args.download_all:
-        failed = 0
-        for index, video in enumerate(videos, 1):
-            best = _pick(video, args.quality)
-            if not best:
-                print(f"[{index}/{len(videos)}] Lewati {video.video_id} (tidak ada mp4)")
-                failed += 1
-                continue
-            dest = f"{video.creator_username or video.video_id}_{video.video_id}.mp4"
-            try:
-                download_media(client.session, best[0].url, dest)
-                print(f"[{index}/{len(videos)}] Tersimpan: {dest}")
-            except Exception as error:
-                print(f"[{index}/{len(videos)}] Gagal {video.video_id}: {error}", file=sys.stderr)
-                failed += 1
-        if failed:
-            return 1
     return 0
+
+
+def build_entries(username, videos):
+    """Convert VideoInfo list into DownloadEntry list (all status=pending)."""
+    username = username.lstrip("@")
+    entries = []
+    for index, video in enumerate(videos, 1):
+        best = _pick(video, "h264")
+        page_url = "https://www.tiktok.com/@%s/video/%s" % (video.creator_username or username, video.video_id)
+        entries.append(
+            DownloadEntry(
+                index=index,
+                video_id=video.video_id,
+                caption=video.caption or "",
+                page_url=page_url,
+                mp4_url=best[0].url if best else "",
+                captured_at=int(time.time()),
+                filename="%d_%s_%s.mp4" % (index, video.video_id, video.creator_username or username),
+                status="pending",
+            )
+        )
+    return entries
+
+
+def _has_ftyp(path):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(8)[4:8] == b"ftyp"
+    except OSError:
+        return False
+
+
+def _is_complete(path, expected_size=None):
+    """A download counts as done only if it matches the expected size (when known)."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    if size <= 1024 or not _has_ftyp(path):
+        return False
+    if expected_size:
+        return size >= expected_size * 0.99
+    return True
+
+
+def prepare_download_batch(entries):
+    """Mark complete files as success; re-queue missing files; return (to_process, skipped)."""
+    to_process = []
+    skipped = 0
+    for entry in entries:
+        if entry.status == "success":
+            if entry.filename and _is_complete(entry.filename, entry.expected_size):
+                skipped += 1
+                continue
+            entry.status = "pending"
+            entry.error = None
+            to_process.append(entry)
+            continue
+        if entry.status in ("pending", "failed"):
+            if entry.filename and _is_complete(entry.filename, entry.expected_size):
+                entry.status = "success"
+                entry.size = os.path.getsize(entry.filename)
+                entry.error = None
+                skipped += 1
+                continue
+            to_process.append(entry)
+    return to_process, skipped
+
+
+COOKIE_DEATH_THRESHOLD = 3
+
+
+def is_cookie_error(error):
+    message = str(error).lower()
+    return any(
+        keyword in message
+        for keyword in ("cookie", "diblokir", "blocked", "expired", "10204", "ip/region")
+    )
+
+
+def process_download_batch(entries, client, concurrency, quality, reporter, state_path, username):
+    """Download pending/failed entries with a thread pool. Returns stats dict."""
+    to_process, skipped = prepare_download_batch(entries)
+    total = len(entries)
+    success = failed = total_size = 0
+    done = skipped
+    consecutive_failures = 0
+    stop = threading.Event()
+    lock = threading.Lock()
+    failures = []
+    active = [0]
+
+    save_state(state_path, username, entries, concurrency)
+
+    def work(entry):
+        nonlocal success, failed, total_size, done, consecutive_failures
+        index, filename = entry.index, entry.filename
+        try:
+            if stop.is_set():
+                reason = "cookie_expired"
+                entry.status = "failed"
+                entry.error = reason
+                with lock:
+                    failed += 1
+                    done += 1
+                    failures.append((filename, reason))
+                    save_state(state_path, username, entries, concurrency)
+                reporter.fail(index, total, filename, reason)
+                return
+
+            reporter.begin_video(index, total, filename)
+            info = get_video_info(entry.page_url, client)
+            best = _pick(info, quality)
+            if not best:
+                raise TikTokError("tidak ada kandidat mp4")
+            with lock:
+                consecutive_failures = 0
+
+            entry.status = "downloading"
+            expected = {"size": 0}
+
+            def on_progress(received, total_bytes, speed):
+                if total_bytes:
+                    expected["size"] = total_bytes
+                reporter.progress(received, total_bytes, speed)
+
+            received = download_media(client.session, best[0].url, filename, on_progress=on_progress)
+            entry.status = "success"
+            entry.error = None
+            entry.size = received
+            entry.expected_size = expected["size"] or received
+            with lock:
+                success += 1
+                total_size += entry.size or 0
+                done += 1
+                save_state(state_path, username, entries, concurrency)
+            reporter.success(index, total, filename, entry.size)
+        except Exception as error:
+            reason = "cookie_expired" if is_cookie_error(error) else str(error)[:120]
+            entry.status = "failed"
+            entry.error = reason
+            with lock:
+                consecutive_failures += 1
+                failed += 1
+                done += 1
+                failures.append((filename, reason))
+                save_state(state_path, username, entries, concurrency)
+                if consecutive_failures >= COOKIE_DEATH_THRESHOLD:
+                    stop.set()
+            reporter.fail(index, total, filename, reason)
+        finally:
+            with lock:
+                reporter.overall(done, total, max(0, active[0] - 1))
+
+    def worker(entry):
+        with lock:
+            active[0] += 1
+        try:
+            work(entry)
+        finally:
+            with lock:
+                active[0] -= 1
+
+    if to_process:
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+            list(pool.map(worker, to_process))
+
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "skipped": skipped,
+        "total_size": total_size,
+        "failures": failures,
+    }
+
+
+def run_collect(args, client):
+    username = args.user.lstrip("@")
+    try:
+        videos = list_user_videos(args.user, client, max_count=args.max, seed_url=args.seed)
+    except TikTokError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    if not videos:
+        print(f"Tidak ada video ditemukan untuk @{username}.")
+        return 1
+    entries = build_entries(username, videos)
+    state_path = args.state or default_state_path(username)
+    save_state(state_path, username, entries, args.concurrency)
+    print(f"Tersimpan {len(entries)} video ke {state_path}")
+    if args.json:
+        print(_format_user_list_json(videos))
+    else:
+        print(_format_user_list(videos))
+    return 0
+
+
+def run_download_all(args, client):
+    username = args.user.lstrip("@")
+    state_path = args.state or default_state_path(username)
+    state = load_state(state_path)
+    if not state:
+        print(
+            f"Error: state file {state_path} tidak ditemukan. Jalankan --collect dulu.",
+            file=sys.stderr,
+        )
+        return 1
+    entries = [DownloadEntry.from_dict(v) for v in state.get("videos", []) if isinstance(v, dict)]
+    if not entries:
+        print("Error: state file kosong.", file=sys.stderr)
+        return 1
+
+    concurrency = max(1, args.concurrency)
+    reporter = BatchReporter()
+    reporter.start(username, len(entries), concurrency, state_path)
+    start_time = time.time()
+    result = process_download_batch(
+        entries, client, concurrency, args.quality, reporter, state_path, username
+    )
+    elapsed = time.time() - start_time
+    reporter.finish(
+        total=result["total"],
+        success=result["success"],
+        failed=result["failed"],
+        skipped=result["skipped"],
+        total_size=result["total_size"],
+        elapsed=elapsed,
+        failures=result["failures"],
+        state_path=state_path,
+    )
+    return 1 if result["failed"] else 0
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 import os
 import random
 import string
+import time
 
 from curl_cffi.requests import Session
 
@@ -43,7 +44,7 @@ def load_cookie_string(cookie_flag, env_name="TIKTOK_COOKIE", file_path="cookies
     return {}
 
 
-def download_media(session, url, dest, referer="https://www.tiktok.com/"):
+def download_media(session, url, dest, referer="https://www.tiktok.com/", on_progress=None):
     """Download a media URL to dest using the given session. Returns dest."""
     response = session.get(
         url,
@@ -62,14 +63,26 @@ def download_media(session, url, dest, referer="https://www.tiktok.com/"):
     content_type = response.headers.get("Content-Type", "")
     if "video" not in content_type.lower() and "octet-stream" not in content_type.lower():
         raise RuntimeError("Respons bukan video (Content-Type: %s)" % content_type)
+    total = int(response.headers.get("Content-Length") or 0) or 0
+    received = 0
+    start = time.time()
     with open(dest, "wb") as handle:
         if hasattr(response, "iter_content"):
             for chunk in response.iter_content(chunk_size=65536):
                 if chunk:
                     handle.write(chunk)
+                    received += len(chunk)
+                    if on_progress:
+                        elapsed = time.time() - start
+                        speed = received / elapsed if elapsed > 0 else 0
+                        on_progress(received, total, speed)
         else:
-            handle.write(response.content)
-    return dest
+            data = response.content
+            handle.write(data)
+            received = len(data)
+            if on_progress:
+                on_progress(received, received, 0)
+    return received
 
 
 class TikTokClient:

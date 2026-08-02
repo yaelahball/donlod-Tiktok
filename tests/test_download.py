@@ -31,7 +31,7 @@ class TestDownloadMedia(unittest.TestCase):
             dest = os.path.join(tmp, "video.mp4")
             session = FakeSession()
             result = download_media(session, "https://v16.tiktokcdn.com/a.mp4", dest)
-            self.assertEqual(result, dest)
+            self.assertEqual(result, len(b"MP4DATA"))
             with open(dest, "rb") as handle:
                 self.assertEqual(handle.read(), b"MP4DATA")
 
