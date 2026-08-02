@@ -1,0 +1,6 @@
+import sys
+
+from tiktok_link.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())
