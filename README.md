@@ -129,16 +129,21 @@ Cara ambil cookie: buka TikTok di browser → DevTools → Network → klik requ
 ## Cara kerja
 
 1. Normalisasi URL (dukung short link `vm.tiktok.com` / `/t/` dan link penuh)
-2. Jalur utama: web API `https://www.tiktok.com/api/item/detail/?aid=1988&itemId=...`
-   dengan impersonate Chrome TLS (`curl_cffi`) + cookie `ms_token`
-3. Fallback: parse `<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">` dari halaman video
-   (jalur paling andal — biasanya bekerja hanya dengan cookie `ms_token`)
-4. Ranking kandidat: H.264 didahulukan, lalu resolusi (dari `GearName`) & bitrate tertinggi
-5. Mode `--user`: resolve `secUid` (profil HTML → `user/detail` API → seed video), lalu
-   paginate `https://www.tiktok.com/api/creator/item_list/` hingga `hasMorePrevious=false`
+2. Resolusi berlapis (fallback otomatis, tahan WAF):
+   - Jalur utama: web API `https://www.tiktok.com/api/item/detail/?aid=1988&itemId=...`
+     dengan impersonate Chrome TLS (`curl_cffi`) + cookie `ms_token`
+   - Halaman **mobile UA** → parse `<script id="api-data">` (`videoDetail.itemInfo.itemStruct`)
+   - Halaman **embed** `https://www.tiktok.com/embed/v2/<id>` → parse
+     `__FRONTITY_CONNECT_STATE__` (`videoData.itemInfos`) — biasanya tanpa cookie
+   - Halaman video desktop (universal data), dengan **pemecah WAF proof-of-work**
+     (Slardar challenge dihitung murni via `hashlib`, cookie `_wafchallengeid`)
+3. Ranking kandidat: H.264 didahulukan, lalu resolusi (dari `GearName`) & bitrate tertinggi
+4. Mode `--user`: resolve `secUid` (profil HTML → `user/detail` API → seed video), lalu
+   paginate `https://www.tiktok.com/api/creator/item_list/`
 
-> Catatan: endpoint `item/detail` bisa balas kosong dari beberapa jaringan. Jalur HTML
-> (universal data) yang terbukti stabil. Cookie `ms_token` diambil dari browser login kamu.
+> Catatan: endpoint `item/detail` dan `creator/item_list` bisa balas kosong / `statusCode 10201`
+> dari beberapa jaringan. Jalur mobile/embed/HTML terbukti stabil; pemecah WAF menangani
+> halaman yang diproteksi Slardar. Cookie `ms_token` diambil dari browser login kamu.
 
 ## Error umum
 

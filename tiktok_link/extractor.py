@@ -123,6 +123,87 @@ def extract_from_api(payload):
     return None
 
 
+def _get_script_json(html, script_id):
+    match = re.search(
+        r'<script[^>]+id=["\']%s["\'][^>]*>(.*?)</script>' % re.escape(script_id),
+        html,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_from_api_data(html):
+    """Extract VideoInfo from the mobile page's `<script id="api-data">` payload."""
+    data = _get_script_json(html, "api-data")
+    if not isinstance(data, dict):
+        return None
+    return extract_from_api(data.get("videoDetail") or data)
+
+
+def extract_from_embed(html):
+    """Extract VideoInfo from an embed page's `__FRONTITY_CONNECT_STATE__` payload."""
+    data = _get_script_json(html, "__FRONTITY_CONNECT_STATE__")
+    if not isinstance(data, dict):
+        return None
+    sources = (data.get("source") or {}).get("data") or {}
+    if not isinstance(sources, dict):
+        return None
+
+    item_infos = None
+    for key, entry in sources.items():
+        if not isinstance(entry, dict):
+            continue
+        video_data = entry.get("videoData")
+        if isinstance(video_data, dict) and video_data.get("itemInfos"):
+            item_infos = video_data["itemInfos"]
+            break
+    if not isinstance(item_infos, dict):
+        return None
+
+    video_id = item_infos.get("id") or ""
+    if not video_id:
+        return None
+    if isinstance(video_id, (int, float)):
+        video_id = str(int(video_id))
+
+    author = item_infos.get("authorInfos") or {}
+    video = item_infos.get("video") or {}
+    meta = video.get("videoMeta") or {}
+
+    candidates = []
+    seen = set()
+    for url in video.get("urls") or []:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        candidates.append(
+            MediaCandidate(
+                url=url,
+                source="embed",
+                quality=_first_int(meta.get("height")),
+                width=_first_int(meta.get("width")),
+                height=_first_int(meta.get("height")),
+            )
+        )
+
+    covers = item_infos.get("covers") or []
+    return VideoInfo(
+        video_id=video_id,
+        creator_username=author.get("uniqueId") or "",
+        creator_display_name=author.get("nickName") or "",
+        caption=item_infos.get("text") or "",
+        duration=_first_int(meta.get("duration")),
+        cover_url=covers[0] if covers else "",
+        sec_uid=author.get("secUid") or "",
+        candidates=candidates,
+    )
+
+
 def _get_universal_data(html):
     match = re.search(
         r'<script[^>]+id=["\']__UNIVERSAL_DATA_FOR_REHYDRATION__["\'][^>]*>(.*?)</script>',

@@ -1,13 +1,26 @@
 """HTTP client with Chrome TLS impersonation and cookie handling."""
 
+import base64
+import hashlib
+import json
 import os
 import random
+import re
 import string
 import time
 
 from curl_cffi.requests import Session
 
 API_ITEM_DETAIL = "https://www.tiktok.com/api/item/detail/"
+
+UA_DESKTOP = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+UA_MOBILE = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+)
 
 
 def generate_verify_fp():
@@ -49,10 +62,7 @@ def download_media(session, url, dest, referer="https://www.tiktok.com/", on_pro
     response = session.get(
         url,
         headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": UA_DESKTOP,
             "Referer": referer,
         },
         timeout=60,
@@ -93,12 +103,9 @@ class TikTokClient:
             self.session.cookies.update(cookies)
         self.verify_fp = generate_verify_fp()
 
-    def _common_headers(self, referer="https://www.tiktok.com/"):
+    def _common_headers(self, referer="https://www.tiktok.com/", user_agent=UA_DESKTOP):
         return {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": user_agent,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": referer,
@@ -116,10 +123,66 @@ class TikTokClient:
         response.raise_for_status()
         return response.json()
 
-    def fetch_video_page(self, page_url):
-        response = self.session.get(page_url, headers=self._common_headers(page_url), timeout=20)
+    def fetch_video_page(self, page_url, user_agent=UA_DESKTOP):
+        response = self.session.get(
+            page_url,
+            headers=self._common_headers(page_url, user_agent=user_agent),
+            timeout=20,
+        )
         response.raise_for_status()
         return response.text
+
+    def fetch_embed_page(self, video_id):
+        """Fetch the public embed page, which usually bypasses the video WAF."""
+        url = f"https://www.tiktok.com/embed/v2/{video_id}"
+        response = self.session.get(
+            url,
+            headers=self._common_headers("https://www.tiktok.com/"),
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.text
+
+    def solve_waf_challenge(self, html):
+        """Solve TikTok's Slardar proof-of-work challenge and set the cookies.
+
+        Returns True if challenge cookies were set, False otherwise.
+        Pure Python (hashlib) implementation, no browser required.
+        """
+        if not html or "wafchallengeid" not in html:
+            return False
+
+        cs_match = re.search(
+            r'<p[^>]+id=["\']cs["\'][^>]*class=["\']([^"\']+)["\']', html, re.IGNORECASE
+        )
+        wci_match = re.search(
+            r'<p[^>]+id=["\']wci["\'][^>]*class=["\']([^"\']+)["\']', html, re.IGNORECASE
+        )
+        if not cs_match or not wci_match:
+            return False
+
+        try:
+            challenge = json.loads(base64.b64decode(cs_match.group(1) + "==="))
+            expected = base64.b64decode(challenge["v"]["c"])
+            base_hash = hashlib.sha256(base64.b64decode(challenge["v"]["a"]))
+        except (KeyError, ValueError, TypeError):
+            return False
+
+        for number in range(1_000_001):
+            test_hash = base_hash.copy()
+            test_hash.update(str(number).encode())
+            if test_hash.digest() == expected:
+                challenge["d"] = base64.b64encode(str(number).encode()).decode()
+                break
+        else:
+            return False
+
+        cookie_name = wci_match.group(1)
+        cookie_value = base64.b64encode(
+            json.dumps(challenge, separators=(",", ":")).encode()
+        ).decode()
+        self.session.cookies.set(cookie_name, cookie_value, domain=".tiktok.com")
+        return True
 
     def fetch_profile_page(self, username):
         username = username.lstrip("@")

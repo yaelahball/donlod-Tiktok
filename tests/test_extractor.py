@@ -1,6 +1,11 @@
 import unittest
 
-from tiktok_link.extractor import extract_from_api, extract_from_html
+from tiktok_link.extractor import (
+    extract_from_api,
+    extract_from_api_data,
+    extract_from_embed,
+    extract_from_html,
+)
 from tiktok_link.models import rank_best, rank_candidates
 
 API_PAYLOAD = {
@@ -106,6 +111,75 @@ class TestExtractFromHtml(unittest.TestCase):
 
     def test_returns_none_when_script_missing(self):
         self.assertIsNone(extract_from_html("<html><body>no data</body></html>"))
+
+
+class TestExtractFromApiData(unittest.TestCase):
+    def test_parses_mobile_api_data_script(self):
+        html = (
+            '<html><script id="api-data" type="application/json">'
+            + __import__("json").dumps({"videoDetail": API_PAYLOAD})
+            + "</script></html>"
+        )
+        info = extract_from_api_data(html)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.video_id, "7234567890123456789")
+        self.assertEqual(info.creator_username, "dave.xp")
+
+    def test_returns_none_when_script_missing(self):
+        self.assertIsNone(extract_from_api_data("<html></html>"))
+
+
+EMBED_PAYLOAD = {
+    "source": {
+        "data": {
+            "/embed/v2/7684309658567249174": {
+                "videoData": {
+                    "itemInfos": {
+                        "id": "7684309658567249174",
+                        "text": "Switzerland #travel",
+                        "authorInfos": {
+                            "uniqueId": "life_of_fab27",
+                            "nickName": "Fab Frei",
+                            "secUid": "MS4wLjABAAAA",
+                        },
+                        "covers": ["https://p16.tiktokcdn.com/cover.jpg"],
+                        "video": {
+                            "urls": [
+                                "https://v9.tiktokcdn.com/video/tos/no1a/abc/?mime_type=video_mp4",
+                            ],
+                            "videoMeta": {"width": 576, "height": 1024, "duration": 23},
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+class TestExtractFromEmbed(unittest.TestCase):
+    def test_parses_frontity_connect_state(self):
+        html = (
+            '<script id="__FRONTITY_CONNECT_STATE__">'
+            + __import__("json").dumps(EMBED_PAYLOAD)
+            + "</script>"
+        )
+        info = extract_from_embed(html)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.video_id, "7684309658567249174")
+        self.assertEqual(info.creator_username, "life_of_fab27")
+        self.assertEqual(info.caption, "Switzerland #travel")
+        self.assertEqual(info.duration, 23)
+        self.assertEqual(info.sec_uid, "MS4wLjABAAAA")
+        self.assertEqual(len(info.candidates), 1)
+        self.assertIn("video_mp4", info.candidates[0].url)
+
+    def test_returns_none_when_script_missing(self):
+        self.assertIsNone(extract_from_embed("<html></html>"))
+
+    def test_returns_none_when_no_video_data(self):
+        html = '<script id="__FRONTITY_CONNECT_STATE__">{"source": {"data": {}}}</script>'
+        self.assertIsNone(extract_from_embed(html))
 
 
 class TestRankCandidates(unittest.TestCase):

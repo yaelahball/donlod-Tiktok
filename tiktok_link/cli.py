@@ -8,10 +8,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from tiktok_link.client import TikTokClient, download_media, load_cookie_string
+from tiktok_link.client import TikTokClient, UA_MOBILE, download_media, load_cookie_string
 from tiktok_link.errors import TikTokError
 from tiktok_link.extractor import (
     extract_from_api,
+    extract_from_api_data,
+    extract_from_embed,
     extract_from_html,
     extract_sec_uid_from_html,
     extract_sec_uid_from_user_detail,
@@ -34,8 +36,37 @@ from tiktok_link.resolver import (
 from tiktok_link.ui import BatchReporter
 
 
+def _is_waf_block(html):
+    return bool(html) and "wafchallengeid" in html and "__UNIVERSAL_DATA_FOR_REHYDRATION__" not in html
+
+
+def _resolve_via_mobile(client, url):
+    """Fetch the video page with a mobile UA and parse the `api-data` script."""
+    html = client.fetch_video_page(url, user_agent=UA_MOBILE)
+    return extract_from_api_data(html)
+
+
+def _resolve_via_embed(client, video_id):
+    html = client.fetch_embed_page(video_id)
+    return extract_from_embed(html)
+
+
+def _resolve_via_html(client, url):
+    """Fetch the desktop page, solving the WAF challenge if needed."""
+    html = client.fetch_video_page(url)
+    if _is_waf_block(html):
+        if client.solve_waf_challenge(html):
+            html = client.fetch_video_page(url)
+    info = extract_from_html(html)
+    return info, html
+
+
 def get_video_info(url, client):
-    """Resolve a TikTok URL into a VideoInfo, falling back API -> HTML."""
+    """Resolve a TikTok URL into a VideoInfo using layered fallbacks.
+
+    Order: web API -> mobile page (`api-data`) -> embed page -> desktop HTML
+    (with WAF proof-of-work challenge solving).
+    """
     if is_short_link(url):
         url = client.resolve_short_link(url)
     else:
@@ -50,39 +81,55 @@ def get_video_info(url, client):
     except Exception:
         payload = None
     info = extract_from_api(payload) if payload else None
+    if info:
+        return info
 
-    if not info:
-        html = fetch_page_with_retry(client, url, retries=3, delay=1.0)
-        info = extract_from_html(html)
-        if not info:
-            status_code, status_msg = extract_status(html)
-            if status_code in (10216, 10222):
-                raise _tagged_error("Video private atau butuh login (statusCode %d)." % status_code, "soft")
-            if status_code == 10204:
-                if status_msg == "status_self_see":
-                    raise _tagged_error(
-                        "Video private (hanya bisa dilihat pembuatnya, statusCode 10204).", "soft"
-                    )
-                if status_msg == "person_geo_fencing":
-                    raise _tagged_error(
-                        "Video dibatasi region (person_geo_fencing, statusCode 10204).", "soft"
-                    )
-                raise _tagged_error(
-                    "TikTok menolak akses video ini (statusCode 10204, %s)." % (status_msg or "unknown"),
-                    "hard",
-                )
-            if status_code and status_code != 0:
-                raise _tagged_error(
-                    "TikTok menolak akses video ini (statusCode %d)." % status_code, "hard"
-                )
+    for resolver in (
+        lambda: _resolve_via_mobile(client, url),
+        lambda: _resolve_via_embed(client, video_id),
+    ):
+        try:
+            info = resolver()
+        except Exception:
+            info = None
+        if info:
+            return info
 
-    if not info:
-        raise _tagged_error(
-            "Tidak dapat menemukan link MP4. Video mungkin private, butuh login, "
-            "atau IP/cookie kamu diblokir.",
-            "hard",
-        )
-    return info
+    try:
+        info, html = _resolve_via_html(client, url)
+    except Exception:
+        info, html = None, ""
+
+    if info:
+        return info
+
+    if html:
+        status_code, status_msg = extract_status(html)
+        if status_code in (10216, 10222):
+            raise _tagged_error("Video private atau butuh login (statusCode %d)." % status_code, "soft")
+        if status_code == 10204:
+            if status_msg == "status_self_see":
+                raise _tagged_error(
+                    "Video private (hanya bisa dilihat pembuatnya, statusCode 10204).", "soft"
+                )
+            if status_msg == "person_geo_fencing":
+                raise _tagged_error(
+                    "Video dibatasi region (person_geo_fencing, statusCode 10204).", "soft"
+                )
+            raise _tagged_error(
+                "TikTok menolak akses video ini (statusCode 10204, %s)." % (status_msg or "unknown"),
+                "hard",
+            )
+        if status_code and status_code != 0:
+            raise _tagged_error(
+                "TikTok menolak akses video ini (statusCode %d)." % status_code, "hard"
+            )
+
+    raise _tagged_error(
+        "Tidak dapat menemukan link MP4. Video mungkin private, butuh login, "
+        "atau IP/cookie kamu diblokir.",
+        "hard",
+    )
 
 
 def _pick(info, quality):
@@ -384,11 +431,13 @@ HARD_FAILURE_THRESHOLD = 5
 
 
 def fetch_page_with_retry(client, url, retries=3, delay=1.0):
-    """Fetch a video page, retrying until universal data appears (WAF-flaky resilient)."""
+    """Fetch a video page, retrying and solving the WAF challenge when needed."""
     html = ""
     for attempt in range(max(1, retries)):
         try:
             html = client.fetch_video_page(url)
+            if _is_waf_block(html) and client.solve_waf_challenge(html):
+                html = client.fetch_video_page(url)
         except Exception:
             html = ""
         if "__UNIVERSAL_DATA_FOR_REHYDRATION__" in html:
