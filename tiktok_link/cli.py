@@ -18,6 +18,7 @@ from tiktok_link.extractor import (
     extract_sec_uid_from_html,
     extract_sec_uid_from_user_detail,
     extract_status,
+    extract_user_embed_video_ids,
     extract_videos_from_list,
 )
 from tiktok_link.models import (
@@ -40,6 +41,14 @@ def _is_waf_block(html):
     return bool(html) and "wafchallengeid" in html and "__UNIVERSAL_DATA_FOR_REHYDRATION__" not in html
 
 
+def _fetch_page_waf_aware(client, url):
+    """Fetch a page, solving the WAF challenge if the first response is blocked."""
+    html = client.fetch_video_page(url)
+    if _is_waf_block(html) and client.solve_waf_challenge(html):
+        html = client.fetch_video_page(url)
+    return html
+
+
 def _resolve_via_mobile(client, url):
     """Fetch the video page with a mobile UA and parse the `api-data` script."""
     html = client.fetch_video_page(url, user_agent=UA_MOBILE)
@@ -52,11 +61,8 @@ def _resolve_via_embed(client, video_id):
 
 
 def _resolve_via_html(client, url):
-    """Fetch the desktop page, solving the WAF challenge if needed."""
-    html = client.fetch_video_page(url)
-    if _is_waf_block(html):
-        if client.solve_waf_challenge(html):
-            html = client.fetch_video_page(url)
+    """Fetch the desktop page (richest metadata), solving the WAF challenge if needed."""
+    html = _fetch_page_waf_aware(client, url)
     info = extract_from_html(html)
     return info, html
 
@@ -64,8 +70,8 @@ def _resolve_via_html(client, url):
 def get_video_info(url, client):
     """Resolve a TikTok URL into a VideoInfo using layered fallbacks.
 
-    Order: web API -> mobile page (`api-data`) -> embed page -> desktop HTML
-    (with WAF proof-of-work challenge solving).
+    Order: desktop HTML (richest candidates, WAF-solved) -> web API -> mobile
+    page (`api-data`) -> embed page.
     """
     if is_short_link(url):
         url = client.resolve_short_link(url)
@@ -75,6 +81,13 @@ def get_video_info(url, client):
     video_id = extract_video_id(url)
     if not video_id:
         raise TikTokError("Tidak dapat menemukan video ID pada URL tersebut.")
+
+    try:
+        info, html = _resolve_via_html(client, url)
+    except Exception:
+        info, html = None, ""
+    if info:
+        return info
 
     try:
         payload = client.fetch_item_detail(video_id)
@@ -94,14 +107,6 @@ def get_video_info(url, client):
             info = None
         if info:
             return info
-
-    try:
-        info, html = _resolve_via_html(client, url)
-    except Exception:
-        info, html = None, ""
-
-    if info:
-        return info
 
     if html:
         status_code, status_msg = extract_status(html)
@@ -138,21 +143,33 @@ def _pick(info, quality):
     return rank_candidates(info.candidates)
 
 
+def _fetch_profile_waf_aware(client, username):
+    """Fetch a profile page, solving the WAF challenge if needed."""
+    html = client.fetch_profile_page(username)
+    if _is_waf_block(html) and client.solve_waf_challenge(html):
+        html = client.fetch_profile_page(username)
+    return html
+
+
 def resolve_sec_uid(username, client, seed_url=None):
-    """Resolve a username to its secUid. Falls back profile HTML -> API -> seed video."""
+    """Resolve a username to its secUid.
+
+    Falls back through: seed video -> profile HTML (WAF-solved) -> user/detail API
+    -> profile embed's first video (re-resolved via a video page).
+    """
     username = username.lstrip("@")
 
     if seed_url:
         try:
             html = fetch_page_with_retry(client, seed_url, retries=3, delay=1.0)
-            info = extract_from_html(html)
+            info = extract_from_html(html) or extract_from_api_data(html)
             if info and info.sec_uid:
                 return info.sec_uid
         except Exception:
             pass
 
     try:
-        html = client.fetch_profile_page(username)
+        html = _fetch_profile_waf_aware(client, username)
         sec_uid = extract_sec_uid_from_html(html)
         if sec_uid:
             return sec_uid
@@ -164,6 +181,18 @@ def resolve_sec_uid(username, client, seed_url=None):
         sec_uid = extract_sec_uid_from_user_detail(payload)
         if sec_uid:
             return sec_uid
+    except Exception:
+        pass
+
+    try:
+        embed_html = client.fetch_user_embed_page(username)
+        video_ids = extract_user_embed_video_ids(embed_html)
+        if video_ids:
+            info = get_video_info(
+                "https://www.tiktok.com/@%s/video/%s" % (username, video_ids[0]), client
+            )
+            if info and info.sec_uid:
+                return info.sec_uid
     except Exception:
         pass
 

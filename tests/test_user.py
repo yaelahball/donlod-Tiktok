@@ -5,6 +5,7 @@ from tiktok_link.errors import TikTokError
 from tiktok_link.extractor import (
     extract_sec_uid_from_html,
     extract_sec_uid_from_user_detail,
+    extract_user_embed_video_ids,
     extract_videos_from_list,
 )
 from tests.test_extractor import API_PAYLOAD
@@ -57,6 +58,27 @@ class TestExtractVideosFromList(unittest.TestCase):
         self.assertEqual(extract_videos_from_list({"itemList": []}), [])
 
 
+EMBED_USER_HTML = (
+    '<script id="__FRONTITY_CONNECT_STATE__">'
+    '{"source": {"data": {"/embed/@dave.xp": {"videoList": [{"id": "111"}, {"id": "222"}]}}}}'
+    "</script>"
+)
+
+
+class TestExtractUserEmbedVideoIds(unittest.TestCase):
+    def test_returns_video_ids(self):
+        self.assertEqual(extract_user_embed_video_ids(EMBED_USER_HTML), ["111", "222"])
+
+    def test_returns_empty_when_missing(self):
+        self.assertEqual(extract_user_embed_video_ids("<html></html>"), [])
+        self.assertEqual(
+            extract_user_embed_video_ids(
+                '<script id="__FRONTITY_CONNECT_STATE__">{"source": {"data": {}}}</script>'
+            ),
+            [],
+        )
+
+
 class FakeListClient:
     def __init__(self, pages, sec_uid="MS4wLjABAAAAabc"):
         self.pages = pages
@@ -96,6 +118,26 @@ class TestResolveSecUid(unittest.TestCase):
 
         with self.assertRaises(TikTokError):
             resolve_sec_uid("dave.xp", Empty(pages=[]))
+
+    def test_solves_waf_then_reads_profile(self):
+        class WafThenData(FakeListClient):
+            def __init__(self):
+                super().__init__(pages=[])
+                self.solved = False
+                self.challenge_cookie = None
+
+            def fetch_profile_page(self, username):
+                if not self.solved:
+                    return '<html><p id="wci" class="_wafchallengeid"></p></html>'
+                return USER_HTML
+
+            def solve_waf_challenge(self, html):
+                self.solved = True
+                return True
+
+        client = WafThenData()
+        self.assertEqual(resolve_sec_uid("dave.xp", client), "MS4wLjABAAAAabc")
+        self.assertTrue(client.solved)
 
 
 def _item(video_id):

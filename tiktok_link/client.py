@@ -143,6 +143,18 @@ class TikTokClient:
         response.raise_for_status()
         return response.text
 
+    def fetch_user_embed_page(self, username):
+        """Fetch the profile embed page, which exposes a small public video list."""
+        username = username.lstrip("@")
+        url = f"https://www.tiktok.com/embed/@{username}"
+        response = self.session.get(
+            url,
+            headers=self._common_headers("https://www.tiktok.com/"),
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.text
+
     def solve_waf_challenge(self, html):
         """Solve TikTok's Slardar proof-of-work challenge and set the cookies.
 

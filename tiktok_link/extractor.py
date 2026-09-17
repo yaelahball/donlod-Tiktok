@@ -123,6 +123,27 @@ def extract_from_api(payload):
     return None
 
 
+def extract_user_embed_video_ids(html):
+    """Return the public video IDs listed on a profile embed page."""
+    data = _get_script_json(html, "__FRONTITY_CONNECT_STATE__")
+    if not isinstance(data, dict):
+        return []
+    sources = (data.get("source") or {}).get("data") or {}
+    if not isinstance(sources, dict):
+        return []
+
+    video_ids = []
+    for key, entry in sources.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("videoList") is None:
+            continue
+        for video in entry.get("videoList") or []:
+            if isinstance(video, dict) and video.get("id"):
+                video_ids.append(str(video["id"]))
+    return video_ids
+
+
 def _get_script_json(html, script_id):
     match = re.search(
         r'<script[^>]+id=["\']%s["\'][^>]*>(.*?)</script>' % re.escape(script_id),
